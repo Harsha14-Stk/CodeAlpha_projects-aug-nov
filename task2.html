@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SonicWave Music Player</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Phosphor Icons for the UI -->
+    <script src="https://unpkg.com/@phosphor-icons/web@2.0.3"></script>
+    <style>
+        /* Set up Inter font and smooth transitions */
+        body { font-family: 'Inter', sans-serif; transition: background-color 0.3s, color 0.3s; }
+        /* Dark Mode Colors */
+        .dark {
+            --bg-color: #121212;
+            --card-color: #1e1e1e;
+            --text-color: #e0e0e0;
+            --primary-color: #1ed760; /* Spotify Green */
+            --secondary-color: #2a2a2a;
+        }
+        /* Light Mode Colors (Default) */
+        body {
+            --bg-color: #03112c;
+            --card-color: #ffffff;
+            --text-color: #1f2937;
+            --primary-color: #007bff; /* Blue */
+            --secondary-color: #e5e7eb;
+        }
+
+        /* Apply colors using CSS variables */
+        body { background-color: var(--bg-color); color: var(--text-color); }
+        .card { background-color: var(--card-color); }
+        .primary-text { color: var(--primary-color); }
+        .primary-bg { background-color: var(--primary-color); }
+        .secondary-bg { background-color: var(--secondary-color); }
+
+        /* Custom scrollbar for playlist */
+        .playlist-scroll {
+            max-height: calc(100vh - 350px); /* Adjust based on header/footer size */
+        }
+        .playlist-scroll::-webkit-scrollbar { width: 8px; }
+        .playlist-scroll::-webkit-scrollbar-thumb {
+            background-color: var(--primary-color);
+            border-radius: 4px;
+        }
+        .playlist-scroll::-webkit-scrollbar-track {
+            background-color: var(--secondary-color);
+        }
+
+        /* Style the progress bar */
+        #progress-bar-container {
+            height: 8px;
+            cursor: pointer;
+            position: relative;
+        }
+        #progress-bar {
+            height: 100%;
+            background-color: var(--primary-color);
+            transition: width 0.1s linear;
+        }
+        #progress-handle {
+            width: 12px;
+            height: 12px;
+            background-color: var(--card-color);
+            border: 2px solid var(--primary-color);
+            border-radius: 50%;
+            position: absolute;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            transition: transform 0.1s;
+        }
+
+        /* Custom styling for the range input (volume) */
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100px;
+            height: 8px;
+            background: var(--secondary-color);
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: var(--primary-color);
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        input[type=range]::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            background: var(--primary-color);
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        /* Responsive adjustments */
+        @media (min-width: 768px) {
+            .playlist-scroll {
+                max-height: calc(100vh - 200px); /* Taller view on desktop */
+            }
+        }
+    </style>
+    <!-- Load Firebase -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- GLOBAL FIREBASE VARIABLES (MANDATORY) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { /* mock config */ };
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        setLogLevel('debug'); // Enable Firestore logging
+
+        // --- GLOBAL APP STATE ---
+        let db = null;
+        let auth = null;
+        let userId = null;
+        let isAuthReady = false;
+
+        const state = {
+            playlist: [
+                { id: 1, title: "Mock Track 1: Lo-Fi Groove", artist: "Anon", genre: "Lo-Fi", duration: "3:15", src: "https://storage.googleapis.com/codeskulptor-assets/ricerocks_assets/music/ship.ogg" },
+                { id: 2, title: "Mock Track 2: Cinematic Build", artist: "Anon", genre: "Cinematic", duration: "4:00", src: "https://storage.googleapis.com/codeskulptor-assets/ricerocks_assets/music/explosion.ogg" },
+                { id: 3, title: "Mock Track 3: Arcade Retro", artist: "Anon", genre: "8-Bit", duration: "2:30", src: "https://commondatastorage.googleapis.com/codeskulptor-assets/sounddogs/thrust.mp3" },
+            ],
+            currentTrackIndex: 0,
+            isPlaying: false,
+            volume: 0.8,
+            searchQuery: '',
+            isDarkMode: false
+        };
+
+        const audio = new Audio();
+
+        // --- FIREBASE INITIALIZATION & AUTH ---
+        async function initializeFirebase() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('user-id-display').textContent = `User ID: ${userId}`;
+                        isAuthReady = true;
+                        console.log("Firebase Auth Ready. User ID:", userId);
+                        loadPlaylistFromDB();
+                    } else {
+                        // Sign in anonymously if no token is provided
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    }
+                });
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                // Fallback UI update if Firebase fails
+                document.getElementById('user-id-display').textContent = 'User ID: (DB Offline)';
+                isAuthReady = true;
+                // Still proceed to render the mock playlist
+                renderPlaylist();
+            }
+        }
+
+        // --- FIRESTORE FUNCTIONS ---
+
+        function getPlaylistRef(uid) {
+            // Public data is shared between users if this were a collaborative app,
+            // but for a personal player, we store it under the user's private path.
+            // Using a simple collection for demonstration.
+            return doc(db, `artifacts/${appId}/users/${uid}/music_data/playlist_config`);
+        }
+
+        function loadPlaylistFromDB() {
+            if (!db || !userId) return;
+
+            const playlistDocRef = getPlaylistRef(userId);
+
+            onSnapshot(playlistDocRef, (docSnap) => {
+                if (docSnap.exists() && docSnap.data().tracks) {
+                    const loadedTracks = JSON.parse(docSnap.data().tracks);
+                    console.log("Playlist loaded from Firestore:", loadedTracks);
+
+                    // Only update the playlist if loaded tracks exist and are different
+                    if (loadedTracks.length > 0) {
+                         // Maintain the current track if it still exists
+                        const currentTrack = state.playlist[state.currentTrackIndex];
+                        state.playlist = loadedTracks;
+
+                        const newIndex = state.playlist.findIndex(t => t.src === currentTrack?.src);
+                        state.currentTrackIndex = newIndex !== -1 ? newIndex : 0;
+                    }
+                } else if (!docSnap.exists()) {
+                    console.log("No playlist found in DB. Saving default playlist.");
+                    // Save the default playlist if none exists
+                    savePlaylist();
+                }
+
+                renderPlaylist();
+                updateNowPlaying();
+            }, (error) => {
+                console.error("Error listening to playlist changes:", error);
+            });
+        }
+
+        async function savePlaylist() {
+            if (!db || !userId) return;
+            const playlistDocRef = getPlaylistRef(userId);
+
+            try {
+                // Serialize the playlist array to JSON string for safety/simplicity
+                await setDoc(playlistDocRef, {
+                    tracks: JSON.stringify(state.playlist),
+                    updatedAt: serverTimestamp(),
+                }, { merge: true });
+                console.log("Playlist saved successfully.");
+            } catch (error) {
+                console.error("Error saving playlist:", error);
+            }
+        }
+
+        // --- UTILITY FUNCTIONS ---
+        function formatTime(seconds) {
+            const min = Math.floor(seconds / 60);
+            const sec = Math.floor(seconds % 60);
+            return `${min}:${sec < 10 ? '0' : ''}${sec}`;
+        }
+
+        function updateProgress() {
+            const currentTime = audio.currentTime;
+            const duration = audio.duration;
+            const progress = (currentTime / duration) * 100 || 0;
+
+            const progressBar = document.getElementById('progress-bar');
+            const progressHandle = document.getElementById('progress-handle');
+            const currentTimeDisplay = document.getElementById('current-time');
+            const durationDisplay = document.getElementById('duration');
+
+            progressBar.style.width = `${progress}%`;
+            progressHandle.style.left = `${progress}%`;
+
+            currentTimeDisplay.textContent = formatTime(currentTime);
+            if (isFinite(duration) && durationDisplay.textContent === '0:00') {
+                durationDisplay.textContent = formatTime(duration);
+                // Update track duration in playlist state if it was a local file or incorrect mock data
+                if (state.playlist[state.currentTrackIndex] && state.playlist[state.currentTrackIndex].duration === "0:00") {
+                    state.playlist[state.currentTrackIndex].duration = formatTime(duration);
+                    // Re-render the playlist to show the correct duration
+                    renderPlaylist();
+                }
+            }
+        }
+
+        function updateNowPlaying() {
+            const track = state.playlist[state.currentTrackIndex];
+            const nowPlayingEl = document.getElementById('now-playing');
+            const coverEl = document.getElementById('now-playing-cover');
+
+            if (track) {
+                nowPlayingEl.innerHTML = `
+                    <div class="text-lg font-bold truncate">${track.title}</div>
+                    <div class="text-sm opacity-70 truncate">${track.artist} (${track.genre})</div>
+                `;
+                // Simple color/icon based cover, replace with image logic if needed
+                coverEl.innerHTML = `<i class="ph-headphones-fill text-5xl primary-text"></i>`;
+            } else {
+                nowPlayingEl.innerHTML = `
+                    <div class="text-lg font-bold">No Track Selected</div>
+                    <div class="text-sm opacity-70">Upload or select a track to begin.</div>
+                `;
+                coverEl.innerHTML = `<i class="ph-music-note-simple-fill text-5xl opacity-50"></i>`;
+            }
+
+            // Update the source if the index changed
+            if (audio.src !== track?.src) {
+                audio.src = track ? track.src : '';
+                audio.load();
+                state.isPlaying = false; // Reset play state until user hits play
+                document.getElementById('play-pause-icon').className = 'ph-play-fill';
+                document.getElementById('current-time').textContent = '0:00';
+                document.getElementById('duration').textContent = '0:00';
+            }
+        }
+
+        function togglePlayPause() {
+            const iconEl = document.getElementById('play-pause-icon');
+
+            if (!state.playlist[state.currentTrackIndex]) {
+                alertModal("Please select a track or upload music first!");
+                return;
+            }
+
+            if (state.isPlaying) {
+                audio.pause();
+                iconEl.className = 'ph-play-fill';
+                state.isPlaying = false;
+            } else {
+                audio.play().catch(e => {
+                    console.error("Error playing audio:", e);
+                    alertModal("Playback failed. Make sure a track is selected.");
+                });
+                iconEl.className = 'ph-pause-fill';
+                state.isPlaying = true;
+            }
+            renderPlaylist(); // Update highlighting
+        }
+
+        function skipTrack(direction) {
+            let newIndex = state.currentTrackIndex + direction;
+
+            if (newIndex >= state.playlist.length) {
+                newIndex = 0; // Loop back to start
+            } else if (newIndex < 0) {
+                newIndex = state.playlist.length - 1; // Loop back to end
+            }
+
+            state.currentTrackIndex = newIndex;
+            updateNowPlaying();
+            // Start playing the new track automatically
+            if (state.isPlaying) {
+                togglePlayPause(); // Pause current
+                togglePlayPause(); // Play new
+            }
+        }
+
+        function setVolume(volumeValue) {
+            state.volume = parseFloat(volumeValue);
+            audio.volume = state.volume;
+            document.getElementById('volume-icon').className =
+                state.volume == 0 ? 'ph-speaker-slash-fill' :
+                state.volume < 0.5 ? 'ph-speaker-low-fill' :
+                'ph-speaker-high-fill';
+        }
+
+        function handleTimeSeek(event) {
+            const container = document.getElementById('progress-bar-container');
+            const rect = container.getBoundingClientRect();
+            const clickX = event.clientX - rect.left;
+            const percentage = clickX / rect.width;
+
+            if (isFinite(audio.duration)) {
+                audio.currentTime = audio.duration * percentage;
+            }
+        }
+
+        // --- PLAYLIST MANAGEMENT & RENDERING ---
+
+        function renderPlaylist() {
+            const playlistEl = document.getElementById('playlist-content');
+            playlistEl.innerHTML = '';
+
+            const filteredPlaylist = state.playlist.filter(track =>
+                track.title.toLowerCase().includes(state.searchQuery) ||
+                track.artist.toLowerCase().includes(state.searchQuery) ||
+                track.genre.toLowerCase().includes(state.searchQuery)
+            );
+
+            if (filteredPlaylist.length === 0) {
+                playlistEl.innerHTML = '<p class="p-4 text-center opacity-60">No tracks found matching your search.</p>';
+                return;
+            }
+
+            filteredPlaylist.forEach((track, index) => {
+                // Find the original index for playback
+                const originalIndex = state.playlist.findIndex(t => t.id === track.id);
+                const isCurrent = originalIndex === state.currentTrackIndex;
+                const isPlaying = isCurrent && state.isPlaying;
+
+                const trackElement = document.createElement('div');
+                trackElement.className = `p-3 mb-2 rounded-lg cursor-pointer transition-all duration-200 shadow-sm
+                    ${isCurrent ? 'primary-bg text-white' : 'card hover:bg-opacity-90 dark:hover:bg-opacity-80'}
+                    ${isPlaying ? 'ring-2 ring-primary-color dark:ring-white ring-offset-2 ring-offset-[var(--bg-color)]' : ''}`;
+                trackElement.dataset.index = originalIndex;
+                trackElement.onclick = () => selectTrack(originalIndex);
+
+                trackElement.innerHTML = `
+                    <div class="flex items-center justify-between">
+                        <div class="flex-1 min-w-0 pr-4">
+                            <div class="font-semibold truncate ${isCurrent ? 'text-white' : 'primary-text'}">
+                                ${track.title}
+                            </div>
+                            <div class="text-sm opacity-70 ${isCurrent ? 'text-white' : 'text-gray-500 dark:text-gray-400'}">
+                                ${track.artist} / ${track.genre}
+                            </div>
+                        </div>
+                        <div class="text-right text-sm font-mono ${isCurrent ? 'text-white' : 'text-gray-400'}">
+                            ${track.duration}
+                            <button onclick="event.stopPropagation(); removeTrack(${originalIndex});" class="ml-2 p-1 rounded-full hover:bg-opacity-30 transition-colors">
+                                <i class="ph-x-circle-fill ${isCurrent ? 'text-white' : 'text-red-500'} text-lg"></i>
+                            </button>
+                        </div>
+                    </div>
+                `;
+                playlistEl.appendChild(trackElement);
+            });
+        }
+
+        function selectTrack(index) {
+            if (state.currentTrackIndex === index) {
+                togglePlayPause();
+            } else {
+                state.currentTrackIndex = index;
+                updateNowPlaying();
+                // Play immediately
+                state.isPlaying = false; // Force re-toggle
+                togglePlayPause();
+            }
+            renderPlaylist();
+        }
+
+        function removeTrack(index) {
+            state.playlist.splice(index, 1);
+            if (state.currentTrackIndex === index) {
+                audio.pause();
+                state.isPlaying = false;
+                state.currentTrackIndex = Math.min(index, state.playlist.length - 1);
+                updateNowPlaying();
+            } else if (state.currentTrackIndex > index) {
+                state.currentTrackIndex--;
+            }
+            savePlaylist();
+            renderPlaylist();
+        }
+
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (file && file.type.startsWith('audio/')) {
+                const url = URL.createObjectURL(file);
+                const newTrack = {
+                    id: Date.now(),
+                    title: file.name.replace(/\.(mp3|ogg|wav)$/i, ''),
+                    artist: 'Local Upload',
+                    genre: 'Custom',
+                    duration: '0:00', // Duration will be updated once loaded
+                    src: url,
+                    isLocal: true,
+                };
+                state.playlist.push(newTrack);
+                state.currentTrackIndex = state.playlist.length - 1; // Select the new track
+                savePlaylist();
+                updateNowPlaying();
+                // Play immediately
+                state.isPlaying = false; // Force re-toggle
+                togglePlayPause();
+                // Clear the input so the same file can be selected again
+                event.target.value = null;
+            } else if (file) {
+                alertModal("Invalid file type. Please upload an audio file (mp3, wav, ogg).");
+                event.target.value = null;
+            }
+        }
+
+        function handleSearch(event) {
+            state.searchQuery = event.target.value.toLowerCase();
+            renderPlaylist();
+        }
+
+        function toggleDarkMode() {
+            state.isDarkMode = !state.isDarkMode;
+            document.documentElement.classList.toggle('dark', state.isDarkMode);
+            document.getElementById('mode-icon').className = state.isDarkMode ? 'ph-sun-fill' : 'ph-moon-fill';
+        }
+
+        function alertModal(message) {
+            const modal = document.getElementById('alert-modal');
+            document.getElementById('alert-message').textContent = message;
+            modal.classList.remove('hidden');
+        }
+
+        function closeAlertModal() {
+            document.getElementById('alert-modal').classList.add('hidden');
+        }
+
+
+        // --- SETUP EVENT LISTENERS & INITIALIZATION ---
+        window.onload = () => {
+            initializeFirebase();
+
+            // Set up audio events
+            audio.ontimeupdate = updateProgress;
+            audio.onended = () => skipTrack(1);
+            audio.volume = state.volume;
+
+            // Bind UI controls
+            document.getElementById('play-pause-btn').onclick = togglePlayPause;
+            document.getElementById('skip-next-btn').onclick = () => skipTrack(1);
+            document.getElementById('skip-prev-btn').onclick = () => skipTrack(-1);
+            document.getElementById('volume-slider').oninput = (e) => setVolume(e.target.value);
+            document.getElementById('progress-bar-container').onclick = handleTimeSeek;
+
+            document.getElementById('upload-input').onchange = handleFileUpload;
+            document.getElementById('search-input').oninput = handleSearch;
+            document.getElementById('mode-toggle-btn').onclick = toggleDarkMode;
+            document.getElementById('close-modal-btn').onclick = closeAlertModal;
+
+            // Initial UI update
+            document.getElementById('volume-slider').value = state.volume;
+            toggleDarkMode(); // Initialize dark mode off, then call to set icon
+
+            updateNowPlaying();
+        };
+
+        // Expose functions globally for HTML event handlers
+        window.selectTrack = selectTrack;
+        window.removeTrack = removeTrack;
+
+    </script>
+</head>
+<body class="min-h-screen transition-colors duration-300">
+
+    <!-- Main Container -->
+    <div class="max-w-4xl mx-auto p-4 md:p-6 pb-28">
+        <!-- Header & Controls -->
+        <header class="flex flex-col md:flex-row justify-between items-center mb-6 pt-2">
+            <h1 class="text-4xl font-extrabold primary-text mb-4 md:mb-0 flex items-center">
+                <i class="ph-waveform-fill mr-3 text-5xl"></i> SonicWave
+            </h1>
+
+            <div class="flex items-center space-x-4">
+                <!-- Dark Mode Toggle -->
+                <button id="mode-toggle-btn" class="p-3 rounded-full card hover:bg-opacity-80 transition-colors shadow-lg">
+                    <i id="mode-icon" class="ph-moon-fill text-xl"></i>
+                </button>
+                <!-- Upload Button -->
+                <label for="upload-input" class="primary-bg text-white px-4 py-2 rounded-full font-semibold cursor-pointer shadow-xl hover:shadow-2xl transition-all duration-300 transform hover:scale-105">
+                    <i class="ph-upload-simple-fill mr-2"></i> Add Music
+                </label>
+                <input type="file" id="upload-input" accept="audio/*" class="hidden">
+            </div>
+        </header>
+
+        <!-- Search and Filter -->
+        <div class="mb-6">
+            <input type="text" id="search-input" placeholder="Search by title, artist, or genre..."
+                   class="w-full p-3 rounded-lg card shadow-inner focus:ring-2 focus:ring-[var(--primary-color)] focus:outline-none transition-shadow duration-200"
+                   aria-label="Search music">
+        </div>
+
+        <!-- User ID and Status -->
+        <div class="text-xs opacity-50 mb-4 truncate" id="user-id-display">
+            User ID: Loading... (required for private playlist storage)
+        </div>
+
+        <!-- Playlist Section -->
+        <div class="card rounded-xl shadow-2xl p-4 md:p-6">
+            <h2 class="text-2xl font-bold mb-4 border-b pb-2">Playlist</h2>
+            <div id="playlist-content" class="playlist-scroll overflow-y-auto pr-2">
+                <!-- Playlist items will be injected here by JavaScript -->
+                <div class="p-4 text-center opacity-50">Loading playlist...</div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Fixed Music Control Bar (Footer) -->
+    <div class="fixed bottom-0 left-0 w-full secondary-bg shadow-2xl backdrop-blur-md bg-opacity-95 dark:bg-opacity-95 border-t border-gray-300 dark:border-gray-800">
+        <div class="max-w-4xl mx-auto p-4 flex items-center justify-between">
+            
+            <!-- Now Playing (Left) -->
+            <div class="flex items-center space-x-4 min-w-0 flex-shrink-0 mr-4">
+                <div id="now-playing-cover" class="w-16 h-16 rounded-lg bg-gray-600 dark:bg-gray-800 flex items-center justify-center shadow-lg">
+                    <i class="ph-music-note-simple-fill text-5xl opacity-50"></i>
+                </div>
+                <div id="now-playing" class="flex flex-col min-w-0">
+                    <div class="text-lg font-bold truncate">No Track Selected</div>
+                    <div class="text-sm opacity-70 truncate">Upload or select a track to begin.</div>
+                </div>
+            </div>
+            
+            <!-- Controls (Center) -->
+            <div class="flex flex-col items-center flex-grow max-w-sm mx-4">
+                <!-- Playback Buttons -->
+                <div class="flex space-x-6 mb-2">
+                    <button id="skip-prev-btn" class="p-2 text-xl opacity-80 hover:opacity-100 transition-opacity">
+                        <i class="ph-skip-back-fill"></i>
+                    </button>
+                    <button id="play-pause-btn" class="primary-bg text-white p-3 rounded-full text-2xl shadow-xl transition-all duration-300 transform hover:scale-110">
+                        <i id="play-pause-icon" class="ph-play-fill"></i>
+                    </button>
+                    <button id="skip-next-btn" class="p-2 text-xl opacity-80 hover:opacity-100 transition-opacity">
+                        <i class="ph-skip-forward-fill"></i>
+                    </button>
+                </div>
+                
+                <!-- Progress Bar -->
+                <div class="flex items-center w-full space-x-2 text-xs">
+                    <span id="current-time" class="w-8 text-right font-mono opacity-70">0:00</span>
+                    <div id="progress-bar-container" class="flex-grow rounded-full secondary-bg relative overflow-hidden">
+                        <div id="progress-bar" class="w-0"></div>
+                        <div id="progress-handle"></div>
+                    </div>
+                    <span id="duration" class="w-8 text-left font-mono opacity-70">0:00</span>
+                </div>
+            </div>
+            
+            <!-- Volume (Right, hidden on small screens) -->
+            <div class="hidden md:flex items-center space-x-2 flex-shrink-0 ml-4">
+                <i id="volume-icon" class="ph-speaker-high-fill text-xl"></i>
+                <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="0.8" aria-label="Volume control">
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Alert Modal (for non-blocking alerts) -->
+    <div id="alert-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 transition-opacity duration-300">
+        <div class="card p-6 rounded-xl shadow-2xl max-w-sm w-full">
+            <h3 class="text-xl font-bold mb-3 primary-text">Notification</h3>
+            <p id="alert-message" class="mb-4"></p>
+            <button id="close-modal-btn" class="primary-bg text-white w-full py-2 rounded-lg font-semibold hover:bg-opacity-80 transition-colors">
+                Got It
+            </button>
+        </div>
+    </div>
+
+</body>
+</html>
